@@ -324,12 +324,13 @@ public abstract class HttpBindingProtocolGenerator implements ProtocolGenerator 
         Shape inputShape = model.expectShape(operation.getInput()
                 .orElseThrow(() -> new CodegenException("missing input shape for operation: " + operation.getId())));
 
-        HttpBindingIndex bindingIndex = context.getModel().getKnowledge(HttpBindingIndex.class);
+        HttpBindingIndex bindingIndex = model.getKnowledge(HttpBindingIndex.class);
+
         Map<String, HttpBinding> bindingMap = bindingIndex.getRequestBindings(operation).entrySet().stream()
                 .filter(entry -> isRestBinding(entry.getValue().getLocation()))
-                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
-        List<String> bindingMembers = new ArrayList<>(bindingMap.keySet());
-        bindingMembers.sort(String::compareTo);
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue, (v1, v2) -> {
+                    throw new CodegenException("found duplicate binding entries for same response operation shape");
+                }, TreeMap::new));
 
         Symbol restEncoder = getRestEncoderSymbol();
         Symbol inputSymbol = symbolProvider.toSymbol(inputShape);
@@ -475,6 +476,18 @@ public abstract class HttpBindingProtocolGenerator implements ProtocolGenerator 
         });
     }
 
+    private boolean isDereferenceRequired(Shape shape, Symbol symbol) {
+        boolean pointable = symbol.getProperty(SymbolUtils.POINTABLE, Boolean.class)
+                .orElse(false);
+
+        ShapeType shapeType = shape.getType();
+
+        return pointable
+                || shapeType == ShapeType.MAP
+                || shapeType == ShapeType.LIST
+                || shapeType == ShapeType.SET
+                || shapeType == ShapeType.DOCUMENT;
+    }
 
     /**
      * Writes a conditional check of the provided operand represented by the member shape.
@@ -657,9 +670,24 @@ public abstract class HttpBindingProtocolGenerator implements ProtocolGenerator 
                         CodegenUtils.getTimeStampFormatName(format), operand));
                 writer.write("if err != nil { return err }");
                 return "t";
+            case BYTE:
+                writer.addUseImports(GoDependency.STRCONV);
+                return String.format("strconv.ParseInt(%s,0,8)", operand);
             case INTEGER:
                 writer.addUseImports(GoDependency.STRCONV);
                 return String.format("strconv.ParseInt(%s,0,0)", operand);
+            case SHORT:
+                writer.addUseImports(GoDependency.STRCONV);
+                return String.format("strconv.ParseInt(%s,0,16)", operand);
+            case LONG:
+                writer.addUseImports(GoDependency.STRCONV);
+                return String.format("strconv.ParseInt(%s,0,64)", operand);
+            case FLOAT:
+                writer.addUseImports(GoDependency.STRCONV);
+                return String.format("strconv.ParseFloat(%s,0,0)", operand);
+            case DOUBLE:
+                writer.addUseImports(GoDependency.STRCONV);
+                return String.format("strconv.ParseFloat(%s,0,64)", operand);
             case BLOB:
                 writer.addUseImports(GoDependency.BASE64);
                 writer.write("b, err := base64.StdEncoding.DecodeString($L)", operand);
@@ -668,20 +696,33 @@ public abstract class HttpBindingProtocolGenerator implements ProtocolGenerator 
             case STRUCTURE:
                 // Todo: delegate to the shape deserializer
                 break;
+            case SET:
+                // handle set of simple types for prefix headers
+                Shape targetValueSetShape = model.expectShape(targetShape.asSetShape().get().getMember().getTarget());
+                return getListDeserializer(writer, model, targetValueSetShape, binding, operand);
             case LIST:
                 // handle list of simple types for prefix headers
-                Shape targetValueShape = model.expectShape(targetShape.asListShape().get().getMember().getTarget());
-                writer.write("list := make([]$L, 0, 0)", targetValueShape.getId().getName());
-                writer.openBlock("for _, i := range $T.Split($L[1:len($L)-1, $S)", "{", "}", operand, operand, ",",
-                        () -> {
-                    writer.write("list.add($L)", generateHttpBindingsValue(writer, model, targetValueShape, binding,
-                            "i"));
-                });
-                return "list";
+                Shape targetValueListShape = model.expectShape(targetShape.asListShape().get().getMember().getTarget());
+                return getListDeserializer(writer, model, targetValueListShape, binding, operand);
             default:
                 throw new CodegenException("unexpected shape type " + targetShape.getType());
         }
         return value;
+    }
+
+    private String getListDeserializer(GoWriter writer, Model model,
+                                       Shape targetShape, HttpBinding binding, String operand) {
+        writer.write("list := make([]$L, 0, 0)", targetShape.getId().getName());
+
+        writer.addUseImports(GoDependency.STRINGS);
+        writer.openBlock("for _, i := range strings.Split($L[1:len($L)-1], $S) {",
+                "}", operand, operand, ",",
+                () -> {
+                    writer.write("list.add($L)",
+                            generateHttpBindingsValue(writer, model, targetShape, binding,
+                                    "i"));
+                });
+        return "list";
     }
 
     private void writeRestDeserializerMember(
