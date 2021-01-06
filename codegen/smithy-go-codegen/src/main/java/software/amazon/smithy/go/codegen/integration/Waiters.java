@@ -23,8 +23,10 @@ import software.amazon.smithy.codegen.core.SymbolProvider;
 import software.amazon.smithy.go.codegen.GoDelegator;
 import software.amazon.smithy.go.codegen.GoSettings;
 import software.amazon.smithy.go.codegen.GoWriter;
+import software.amazon.smithy.go.codegen.JmespathVisitor;
 import software.amazon.smithy.go.codegen.SmithyGoDependency;
 import software.amazon.smithy.go.codegen.SymbolUtils;
+import software.amazon.smithy.jmespath.JmespathExpression;
 import software.amazon.smithy.model.Model;
 import software.amazon.smithy.model.knowledge.TopDownIndex;
 import software.amazon.smithy.model.shapes.OperationShape;
@@ -449,6 +451,14 @@ public class Waiters implements GoIntegration {
                                 String expectedValue = outputMember.getValue().getExpected();
                                 PathComparator comparator = outputMember.getValue().getComparator();
                                 writer.openBlock("if err == nil {", "}", () -> {
+
+                                    JmespathExpression expression = JmespathExpression.parse(path);
+                                    JmespathVisitor visitor = new JmespathVisitor(
+                                            writer, outputShape, "pathValue", expression);
+                                    visitor.run();
+
+                                    writer.write("// ===============");
+
                                     writer.write("pathValue, err :=  jmespath.Search($S, output)", path);
                                     writer.openBlock("if err != nil {", "}", () -> {
                                         writer.write(
@@ -471,6 +481,13 @@ public class Waiters implements GoIntegration {
                                 expectedValue = ioMember.getValue().getExpected();
                                 comparator = ioMember.getValue().getComparator();
                                 writer.openBlock("if err == nil {", "}", () -> {
+                                    JmespathExpression expression = JmespathExpression.parse(path);
+                                    JmespathVisitor visitor = new JmespathVisitor(
+                                            writer, inputShape, outputShape, "pathValue", expression);
+                                    visitor.run();
+
+                                    writer.write("// ===============");
+
                                     writer.openBlock("pathValue, err :=  jmespath.Search($S, &struct{",
                                             "})", path, () -> {
                                                 writer.write("Input $P \n Output $P \n }{", inputSymbol,
